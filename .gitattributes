@@ -1,0 +1,4 @@
+*.mp4 filter=lfs diff=lfs merge=lfs -text
+
+# pac CLI parser sensitive to line endings.
+*.fx.yaml text eol=crlf

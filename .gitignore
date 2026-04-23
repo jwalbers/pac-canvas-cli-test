@@ -1,0 +1,18 @@
+.DS_Store
+~*
+*~
+.$*
+\#*
+.\#*
+# Don't save credentials or local environment config
+.env
+__pycache__/
+*.venv/
+venv/
+# Don't save tmp or work files in git
+tmp/
+work/
+debug/
+# No Power Apps build artifacts
+*.msapp
+

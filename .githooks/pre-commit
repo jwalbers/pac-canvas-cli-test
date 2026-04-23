@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SRC_ROOT="./src"
+FX_SRC="$SRC_ROOT/Src"
+STRICT_EOL=${STRICT_EOL:-false}
+
+fail() {
+  echo "❌ PAC pre-commit check failed:"
+  echo "   $1"
+  exit 1
+}
+
+warn() {
+  echo "⚠️  $1"
+}
+
+
+# ------------------------------------------------------------
+# Allow PAC unpack baseline commits
+# ------------------------------------------------------------
+
+COMMIT_MSG_FILE=$(git rev-parse --git-path COMMIT_EDITMSG 2>/dev/null || true)
+
+if [[ -f "$COMMIT_MSG_FILE" ]]; then
+  if grep -qE '^(pac: unpack baseline|PAC-UNPACK:)' "$COMMIT_MSG_FILE"; then
+    echo "✅ PAC unpack baseline commit detected; skipping invariants check."
+    exit 0
+  fi
+fi
+
+
+
+echo "🔍 Running normal PAC pre-commit validation in ${FX_SRC}"
+
+# ------------------------------------------------------------
+# 1. pkgs/ directory is REQUIRED
+# ------------------------------------------------------------
+if [[ ! -d "$SRC_ROOT/pkgs" ]]; then
+  fail "Missing required 'pkgs/' directory. Run 'pac canvas unpack' and commit pkgs/."
+fi
+
+# ------------------------------------------------------------
+# 2. Validate .fx.yaml files
+# ------------------------------------------------------------
+for file in $(find "$FX_SRC" -name "*.fx.yaml"); do
+  echo "  • Checking $file"
+
+  # 3a. No tabs
+  if grep -P '\t' "$file" >/dev/null; then
+    fail "$file contains TAB characters. Use spaces only."
+  fi
+
+  # 3b. No UTF‑8 BOM
+  if head -c 3 "$file" | grep -q $'\xef\xbb\xbf'; then
+    fail "$file contains UTF‑8 BOM. Save as UTF‑8 without BOM."
+  fi
+
+  # 3c. CRLF enforcement
+  if file "$file" | grep -vq "CRLF"; then
+    fail "$file does not use CRLF line endings. Use utf-8-dos."
+  fi
+
+  # 3d. Block Studio-only property aliases
+  if grep -E '^\s+(Size|Align|VerticalAlign|LayoutAlignItems)\s*:' "$file" >/dev/null; then
+    warn "$file uses Studio-style property aliases. PAC tolerates these, but prefer canonical .fx.yaml names when editing by hand."
+  fi
+
+  # 3e. Block gallery Studio-only properties
+  if grep -E '^\s+(TemplateFill|DelayItemLoading|LoadingSpinner)\s*:' "$file" >/dev/null; then
+    fail "$file contains Studio-only gallery properties (TemplateFill / DelayItemLoading / LoadingSpinner)."
+  fi
+
+  # 3f. Ensure galleries declare Layout. These can be OK, but are fragile.
+  if grep -q "As gallery:" "$file"; then
+    if ! grep -A5 "As gallery:" "$file" | grep -q "Layout:"; then
+      warn "$file has a gallery without explicit Layout."
+    fi
+  fi
+
+  # 3g. Detect multiline expressions without block scalar
+  awk '
+    /^[[:space:]]+[A-Za-z0-9_]+:\s*=[^|].*\($/ { bad=1 }
+    bad && /^\s+\S/ && !/^\s*=/ { print FILENAME ": possible multiline Power Fx without block scalar"; exit 1 }
+    /\)$/ { bad=0 }
+  ' "$file" || fail "Multiline Power Fx expression in $file must use | or |-."
+done
+
+# ------------------------------------------------------------
+# 3. Empty Connections.json guard
+# ------------------------------------------------------------
+if [[ -f "$SRC_ROOT/Connections/Connections.json" ]]; then
+  size=$(wc -c < "$SRC_ROOT/Connections/Connections.json")
+  if [[ "$size" -lt 10 ]]; then
+    warn "Connections/Connections.json is very small. Prefer deleting it unless required."
+  fi
+fi
+
+# ------------------------------------------------------------
+# 4. CRLF hygiene check for .fx.yaml (WARNING ONLY)
+#
+# Rationale:
+# - CRLF is NOT required by PAC
+# - CRLF reduces fragility in Power Fx parsing
+# - This is advisory, not a correctness gate
+# ------------------------------------------------------------
+echo "🔎 Checking line endings for .fx.yaml (advisory)..."
+
+for file in $(git diff --cached --name-only | grep -E '^Src/.*\.fx\.yaml$'); do
+  if file "$file" | grep -vq "CRLF"; then
+    if [[ "$STRICT_EOL" == "true" ]]; then
+      fail "File ${file} does not have CRLF line endings."
+    else  
+      echo "⚠️  Advisory: $file uses LF line endings."
+      echo "    PAC tolerates this, but CRLF is recommended to reduce parser fragility."
+      echo "    Suggested fix (Emacs): M-x set-buffer-file-coding-system → utf-8-dos"
+      echo ""
+    fi
+  fi
+done
+
+
+# ------------------------------------------------------------
+# 5. Confirm that 'pac canvas' unpacked invariant files have not changed.
+# ------------------------------------------------------------
+# Files that are allowed to change after unpack
+ALLOWED_REGEX='^(Src/.*\.fx\.yaml|Src/Themes\.json|Assets/)'
+
+# List staged files
+STAGED=$(git diff --cached --name-only -- "${SRC_ROOT}" )
+
+# List unstaged files
+UNSTAGED=$(git diff --name-only -- "${SRC_ROOT}" )
+
+check_files() {
+  local files="$1"
+  local label="$2"
+
+  for f in $files; do
+    if [[ ! "$f" =~ $ALLOWED_REGEX ]]; then
+      echo "❌ $label change detected in hands-off file:"
+      echo "   $f"
+      echo ""
+      echo "Only .fx.yaml (and approved assets) may change after pac canvas unpack."
+      echo "If this change is intentional, re-run pac canvas unpack and commit the baseline."
+      exit 1
+    fi
+  done
+}
+check_files "$STAGED" "Staged"
+check_files "$UNSTAGED" "Unstaged"
+
+echo "✅ PAC pre-commit validation passed."
+exit 0
